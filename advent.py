@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 
 import json
-import openai
 import os
-import pdb
 import re
+import urllib.error
+import urllib.request
 
-from random import randint
 from textwrap import dedent, fill
 
-GPT_MODEL = os.environ.get('GPT_MODEL', 'text-davinci-003')
+VENICE_MODEL = os.environ.get('VENICE_MODEL', os.environ.get('GPT_MODEL', 'venice-uncensored'))
+VENICE_API_KEY = os.environ.get('VENICE_API_KEY', os.environ.get('OPENAI_API_KEY'))
+VENICE_API_URL = os.environ.get('VENICE_API_URL', 'https://api.venice.ai/api/v1/chat/completions')
 
 GAME_TEMPLATE = {
     '_title': '$game_title',
@@ -83,27 +84,50 @@ def _get_entity_by_type(game, entity_type):
 ### AI text generation ###
 
 
-openai.api_key = os.environ.get('OPENAI_API_KEY')
-
-
 def _completion(prompt):
-    if GPT_MODEL == 'text-davinci-003':
-        res = openai.Completion.create(
-            engine="text-davinci-003",
-            prompt=prompt,
-            max_tokens=2048,
+    if not VENICE_API_KEY:
+        raise RuntimeError(
+            'Missing VENICE_API_KEY environment variable. '
+            'Set it to your Venice API key.'
         )
-        return res.choices[0].text
-    elif GPT_MODEL == 'gpt-3.5-turbo':
-        res = openai.ChatCompletion.create(
-            model="gpt-3.5-turbo",
-            messages=[{"role": "system",
-                       "content":
-                       "You are a software agent. You output will be strict JSON, with no indentation."},
-                      {"role": "user", "content": prompt}],)
-        return res.choices[0].message.content
-    else:
-        raise Exception('Invalid GPT model')
+
+    payload = {
+        'model': VENICE_MODEL,
+        'messages': [
+            {
+                'role': 'system',
+                'content': 'You are a software agent. Your output will be strict JSON, with no indentation.'
+            },
+            {'role': 'user', 'content': prompt},
+        ],
+        'temperature': 0.7,
+    }
+
+    req = urllib.request.Request(
+        VENICE_API_URL,
+        data=json.dumps(payload).encode('utf-8'),
+        headers={
+            'Authorization': f'Bearer {VENICE_API_KEY}',
+            'Content-Type': 'application/json',
+        },
+        method='POST',
+    )
+
+    try:
+        with urllib.request.urlopen(req) as response:
+            response_data = json.loads(response.read().decode('utf-8'))
+    except urllib.error.HTTPError as e:
+        error_body = e.read().decode('utf-8', errors='replace')
+        raise RuntimeError(
+            f'Venice API HTTP {e.code}: {error_body}'
+        ) from e
+
+    try:
+        return response_data['choices'][0]['message']['content']
+    except (KeyError, IndexError, TypeError) as e:
+        raise RuntimeError(
+            f'Unexpected Venice API response format: {response_data}'
+        ) from e
 
 
 def _generate_content(prompt, str_type):
