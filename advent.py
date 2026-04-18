@@ -130,6 +130,24 @@ def _completion(prompt):
         ) from e
 
 
+
+def _extract_json_string(raw_text):
+    text = raw_text.strip()
+
+    if text.startswith('```'):
+        text = re.sub(r'^```(?:json)?\s*', '', text, flags=re.IGNORECASE)
+        text = re.sub(r'\s*```$', '', text)
+        text = text.strip()
+
+    if not text.startswith('{'):
+        start = text.find('{')
+        end = text.rfind('}')
+        if start != -1 and end != -1 and end > start:
+            text = text[start:end + 1]
+
+    return text
+
+
 def _generate_content(prompt, str_type):
     print(f"# Generating {str_type}...")
     prompt = dedent(prompt).lstrip()
@@ -142,6 +160,8 @@ def _generate_content(prompt, str_type):
     except BaseException:
         print(prompt)
         raise
+
+    json_str = _extract_json_string(json_str)
 
     # fix malformed json
     json_str = re.sub(r',\s*}', '}', json_str)
