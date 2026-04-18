@@ -44,6 +44,9 @@ The game engine includes the following default actions:
    * `drop <object>`: Drop an object if the player is carrying it.
    * `go <north|south|east|west>`: Move to a different location in
      the game.
+   * `n|s|e|w`: Shorthand movement commands.
+   * `save <name>`: Save current game state to disk.
+   * `load <name>`: Load a previous game state from disk.
    * `help`: Displays a list of possible actions.
 
 For any other action, the game engine will delegate the response to the
@@ -88,6 +91,8 @@ Set the following environment variables before running:
 - `VENICE_API_KEY`: your Venice API key (required).
 - `VENICE_MODEL`: Venice model ID (optional; default: `venice-uncensored`).
 - `VENICE_API_URL`: API endpoint (optional; default: `https://api.venice.ai/api/v1/chat/completions`).
+- `VENICE_MAX_RETRIES`: retries for transient Venice/network errors (optional; default: `3`).
+- `SAVE_DIR`: folder for save files (optional; default: `saves`).
 
 Example:
 
