@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
 
 import json
-import openai
 import os
-import pdb
 import re
+import time
+import urllib.error
+import urllib.request
 
-from random import randint
 from textwrap import dedent, fill
 
-GPT_MODEL = os.environ.get('GPT_MODEL', 'text-davinci-003')
+VENICE_MODEL = os.environ.get('VENICE_MODEL', os.environ.get('GPT_MODEL', 'venice-uncensored'))
+VENICE_API_KEY = os.environ.get('VENICE_API_KEY', os.environ.get('OPENAI_API_KEY'))
+VENICE_API_URL = os.environ.get('VENICE_API_URL', 'https://api.venice.ai/api/v1/chat/completions')
+VENICE_MAX_RETRIES = int(os.environ.get('VENICE_MAX_RETRIES', '3'))
+SAVE_DIR = os.environ.get('SAVE_DIR', 'saves')
 
 GAME_TEMPLATE = {
     '_title': '$game_title',
@@ -83,27 +87,131 @@ def _get_entity_by_type(game, entity_type):
 ### AI text generation ###
 
 
-openai.api_key = os.environ.get('OPENAI_API_KEY')
-
-
 def _completion(prompt):
-    if GPT_MODEL == 'text-davinci-003':
-        res = openai.Completion.create(
-            engine="text-davinci-003",
-            prompt=prompt,
-            max_tokens=2048,
+    if not VENICE_API_KEY:
+        raise RuntimeError(
+            'Missing VENICE_API_KEY environment variable. '
+            'Set it to your Venice API key.'
         )
-        return res.choices[0].text
-    elif GPT_MODEL == 'gpt-3.5-turbo':
-        res = openai.ChatCompletion.create(
-            model="gpt-3.5-turbo",
-            messages=[{"role": "system",
-                       "content":
-                       "You are a software agent. You output will be strict JSON, with no indentation."},
-                      {"role": "user", "content": prompt}],)
-        return res.choices[0].message.content
-    else:
-        raise Exception('Invalid GPT model')
+
+    payload = {
+        'model': VENICE_MODEL,
+        'messages': [
+            {
+                'role': 'system',
+                'content': 'You are a software agent. Your output will be strict JSON, with no indentation.'
+            },
+            {'role': 'user', 'content': prompt},
+        ],
+        'temperature': 0.7,
+    }
+
+    req = urllib.request.Request(
+        VENICE_API_URL,
+        data=json.dumps(payload).encode('utf-8'),
+        headers={
+            'Authorization': f'Bearer {VENICE_API_KEY}',
+            'Content-Type': 'application/json',
+        },
+        method='POST',
+    )
+
+    response_data = None
+    retryable_error = None
+    for attempt in range(1, VENICE_MAX_RETRIES + 1):
+        try:
+            with urllib.request.urlopen(req) as response:
+                response_data = json.loads(response.read().decode('utf-8'))
+                break
+        except urllib.error.HTTPError as e:
+            error_body = e.read().decode('utf-8', errors='replace')
+            retryable_error = RuntimeError(
+                f'Venice API HTTP {e.code}: {error_body}'
+            )
+            if e.code not in [429, 500, 502, 503, 504] or attempt == VENICE_MAX_RETRIES:
+                raise retryable_error from e
+        except urllib.error.URLError as e:
+            retryable_error = RuntimeError(f'Network error contacting Venice API: {e.reason}')
+            if attempt == VENICE_MAX_RETRIES:
+                raise retryable_error from e
+
+        sleep_seconds = attempt
+        print(f"Venice request failed, retrying in {sleep_seconds}s...")
+        time.sleep(sleep_seconds)
+
+    if response_data is None and retryable_error is not None:
+        raise retryable_error
+
+    try:
+        return response_data['choices'][0]['message']['content']
+    except (KeyError, IndexError, TypeError) as e:
+        raise RuntimeError(
+            f'Unexpected Venice API response format: {response_data}'
+        ) from e
+
+
+
+
+def _extract_json_string(raw_text):
+    text = raw_text.strip()
+
+    if text.startswith('```'):
+        text = re.sub(r'^```(?:json)?\s*', '', text, flags=re.IGNORECASE)
+        text = re.sub(r'\s*```$', '', text)
+        text = text.strip()
+
+    if not text.startswith('{'):
+        start = text.find('{')
+        end = text.rfind('}')
+        if start != -1 and end != -1 and end > start:
+            text = text[start:end + 1]
+
+    return text
+
+
+def _validate_game(game):
+    if not isinstance(game, dict):
+        raise ValueError("Game data must be a JSON object.")
+
+    required_keys = ['_title', '_plot', 'entities']
+    for key in required_keys:
+        if key not in game:
+            raise ValueError(f"Game JSON missing required key: {key}")
+
+    if not isinstance(game['entities'], list) or len(game['entities']) == 0:
+        raise ValueError("Game JSON must include a non-empty entities list.")
+
+    player = _get_entity_by_type(game, 'player')
+    if player is None:
+        raise ValueError("Game JSON missing player entity.")
+    if 'location' not in player:
+        raise ValueError("Player entity missing location.")
+
+    player_location = _get_entity_by_name(game, player['location'])
+    if player_location is None or player_location.get('type') != 'location':
+        raise ValueError("Player location does not point to a valid location entity.")
+
+    for entity in game['entities']:
+        entity_type = entity.get('type')
+        if entity_type not in ['player', 'location', 'object']:
+            raise ValueError(f"Unsupported entity type: {entity_type}")
+        if entity_type == 'location' and 'exits' not in entity:
+            raise ValueError("Location entity missing exits.")
+
+    return game
+
+
+def _normalize_game(game):
+    player = _get_entity_by_type(game, "player")
+    player_location = _get_entity_by_name(game, player['location'])
+    if "seen" not in player_location:
+        player_location["seen"] = True
+
+    for entity in game['entities']:
+        if entity.get('type', '') == 'object' and 'name' in entity:
+            entity['name'] = entity['name'].lower()
+
+    return game
 
 
 def _generate_content(prompt, str_type):
@@ -119,6 +227,8 @@ def _generate_content(prompt, str_type):
         print(prompt)
         raise
 
+    json_str = _extract_json_string(json_str)
+
     # fix malformed json
     json_str = re.sub(r',\s*}', '}', json_str)
 
@@ -130,7 +240,7 @@ def _generate_content(prompt, str_type):
         print('Error parsing JSON: ' + json_str)
         raise
 
-    return data
+    return _validate_game(data)
 
 
 def generate_world(game):
@@ -152,18 +262,7 @@ def generate_world(game):
     game = _generate_content(prompt, 'game')
     DEBUG(game)
 
-    player = _get_entity_by_type(game, "player")
-
-    # mark initial location as seen
-    player_location = _get_entity_by_name(game, player['location'])
-    player_location["seen"] = True
-
-    # make sure all object names are lowercase
-    for entity in game['entities']:
-        if entity.get('type', '') == 'object':
-            entity['name'] = entity['name'].lower()
-
-    return game
+    return _normalize_game(game)
 
 
 def generate_location(game, location):
@@ -270,6 +369,7 @@ def magic_action(game, sentence):
         sentence)
 
     game = _generate_content(prompt, 'action')
+    game = _normalize_game(game)
 
     if 'output' in game:
         print(fill(game['output']))
@@ -286,6 +386,71 @@ def _clean_sentence(sentence):
     words = sentence.lower().split()
     clean_words = [word for word in words if word not in stopwords]
     return ' '.join(clean_words)
+
+
+def _ensure_save_dir():
+    if not os.path.exists(SAVE_DIR):
+        os.makedirs(SAVE_DIR, exist_ok=True)
+
+
+def save_game(game, save_name='autosave'):
+    _ensure_save_dir()
+    safe_name = re.sub(r'[^a-zA-Z0-9_-]', '_', save_name).strip('_') or 'autosave'
+    save_path = os.path.join(SAVE_DIR, f'{safe_name}.json')
+    with open(save_path, 'w', encoding='utf-8') as f:
+        json.dump(game, f)
+    print(f"Game saved to {save_path}.")
+
+
+def load_game(save_name='autosave'):
+    safe_name = re.sub(r'[^a-zA-Z0-9_-]', '_', save_name).strip('_') or 'autosave'
+    save_path = os.path.join(SAVE_DIR, f'{safe_name}.json')
+    if not os.path.exists(save_path):
+        print(f"No save file found at {save_path}.")
+        return None
+    with open(save_path, 'r', encoding='utf-8') as f:
+        game = json.load(f)
+    game = _validate_game(game)
+    game = _normalize_game(game)
+    print(f"Game loaded from {save_path}.")
+    return game
+
+
+def _parse_command(sentence):
+    normalized = _clean_sentence(sentence)
+    words = normalized.split()
+    if not words:
+        return None, []
+
+    alias_map = {
+        'inspect': 'look',
+        'examine': 'look',
+        'grab': 'take',
+        'pickup': 'take',
+        'pick': 'take',
+        'leave': 'drop',
+        'inv': 'inventory',
+        'i': 'inventory',
+        'n': 'go',
+        's': 'go',
+        'e': 'go',
+        'w': 'go',
+    }
+    direction_alias = {'n': 'north', 's': 'south', 'e': 'east', 'w': 'west'}
+
+    verb = words[0]
+    object_names = words[1:]
+
+    if verb in direction_alias:
+        return 'go', [direction_alias[verb]]
+
+    if verb == 'pick' and object_names and object_names[0] == 'up':
+        object_names = object_names[1:]
+        verb = 'take'
+    else:
+        verb = alias_map.get(verb, verb)
+
+    return verb, object_names
 
 
 def _list_exits_from(game, location):
@@ -314,7 +479,10 @@ def help():
     > look at $object
     > inventory
     > go north
+    > n
     > drop $object
+    > save autosave
+    > load autosave
     > ?
     '''))
 
@@ -441,6 +609,8 @@ if __name__ == '__main__':
         'go': lambda game, direction: go(game, direction),
         'take': lambda game, obj_name: take(game, obj_name),
         'drop': lambda game, obj_name: drop(game, obj_name),
+        'save': lambda game, save_name='autosave': save_game(game, save_name),
+        'load': lambda game, save_name='autosave': load_game(save_name),
         'help': lambda game: help(),
         'debug': lambda game: breakpoint(),
         '?': lambda game: print(game),
@@ -449,7 +619,11 @@ if __name__ == '__main__':
     # main game loop
     while player['alive']:
         sentence = input("What do you want to do? ")
-        verb, *object_names = _clean_sentence(sentence).split()
+        verb, object_names = _parse_command(sentence)
+        if verb is None:
+            print("Please type a command.")
+            print("")
+            continue
         print("")
 
         function = VERB_TO_FUNCTION.get(verb, None)
@@ -457,6 +631,7 @@ if __name__ == '__main__':
         if function is None or len(object_names) > 1:
             # LLM magic!!!
             game = magic_action(game, sentence)
+            player = _get_entity_by_type(game, 'player')
             print("")
             continue
 
@@ -471,7 +646,10 @@ if __name__ == '__main__':
             entities = object_names
 
         try:
-            function(game, *entities)
+            result = function(game, *entities)
+            if verb == 'load' and result is not None:
+                game = result
+                player = _get_entity_by_type(game, 'player')
         except Exception as e:
             print(e)
             print(game)
