@@ -1,11 +1,19 @@
 #!/usr/bin/env python3
 
 import json
+<<<<<<< ours
+=======
+import io
+>>>>>>> theirs
 import os
 import re
 import time
 import urllib.error
 import urllib.request
+<<<<<<< ours
+=======
+from contextlib import redirect_stdout
+>>>>>>> theirs
 
 from textwrap import dedent, fill
 
@@ -589,8 +597,53 @@ def inventory(game):
         print("Nothing special.")
 
 
-if __name__ == '__main__':
+def new_game():
     game = generate_world(GAME_TEMPLATE)
+    return game
+
+
+def run_command(game, sentence):
+    output_capture = io.StringIO()
+    with redirect_stdout(output_capture):
+        verb, object_names = _parse_command(sentence)
+        if verb is None:
+            print("Please type a command.")
+            return game, output_capture.getvalue().strip()
+
+        VERB_TO_FUNCTION = {
+            'quit': lambda game: print("Use browser reset to start over."),
+            'look': lambda game, *objects: look(game, *objects),
+            'inventory': lambda game: inventory(game),
+            'go': lambda game, direction: go(game, direction),
+            'take': lambda game, obj_name: take(game, obj_name),
+            'drop': lambda game, obj_name: drop(game, obj_name),
+            'save': lambda game, save_name='autosave': save_game(game, save_name),
+            'load': lambda game, save_name='autosave': load_game(save_name),
+            'help': lambda game: help(),
+            '?': lambda game: print(game),
+        }
+
+        function = VERB_TO_FUNCTION.get(verb, None)
+        if function is None or len(object_names) > 1:
+            game = magic_action(game, sentence)
+            return game, output_capture.getvalue().strip()
+
+        entities = filter(
+            None,
+            [_get_entity_by_name(game, name) for name in object_names]
+        )
+        if object_names and object_names[0] in ['north', 'south', 'east', 'west']:
+            entities = object_names
+
+        result = function(game, *entities)
+        if verb == 'load' and result is not None:
+            game = result
+
+    return game, output_capture.getvalue().strip()
+
+
+if __name__ == '__main__':
+    game = new_game()
 
     player = _get_entity_by_type(game, 'player')
     current_location = _get_entity_by_name(game, player['location'])

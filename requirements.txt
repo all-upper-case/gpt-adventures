@@ -1,1 +1,5 @@
+<<<<<<< ours
 # No external dependencies required.
+=======
+flask>=3.0,<4.0
+>>>>>>> theirs
